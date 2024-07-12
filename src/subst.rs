@@ -1,47 +1,101 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{Id, Symbol};
+use crate::*;
+use fmt::{Debug, Display, Formatter};
+use thiserror::Error;
 
 /// A variable for use in [`Pattern`]s or [`Subst`]s.
 ///
 /// This implements [`FromStr`], and will only parse if it has a
 /// leading `?`.
 ///
-/// [`Pattern`]: struct.Pattern.html
-/// [`Subst`]: struct.Subst.html
-/// [`FromStr`]: https://doc.rust-lang.org/std/str/trait.FromStr.html
+/// [`FromStr`]: std::str::FromStr
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Var(Symbol);
+pub struct Var(VarInner);
 
-impl FromStr for Var {
-    type Err = String;
+impl Var {
+    /// Create a new variable from a u32.
+    ///
+    /// You can also use special syntax `?#3`, `?#42` to denote a numeric variable.
+    /// These avoid some symbol interning, and can also be created manually from
+    /// using this function or the `From` impl.
+    ///
+    /// ```rust
+    /// # use egg::*;
+    /// assert_eq!(Var::from(12), "?#12".parse().unwrap());
+    /// assert_eq!(Var::from_u32(12), "?#12".parse().unwrap());
+    /// ```
+    pub fn from_u32(num: u32) -> Self {
+        Var(VarInner::Num(num))
+    }
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with('?') && s.len() > 1 {
-            Ok(Var(s.into()))
-        } else {
-            Err(format!("{} doesn't start with '?'", s))
+    /// If this variable was created from a u32, get it back out.
+    pub fn as_u32(&self) -> Option<u32> {
+        match self.0 {
+            VarInner::Num(num) => Some(num),
+            _ => None,
         }
     }
 }
 
-impl fmt::Display for Var {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum VarInner {
+    Sym(Symbol),
+    Num(u32),
+}
+
+#[derive(Debug, Error)]
+pub enum VarParseError {
+    #[error("pattern variable {0:?} should have a leading question mark")]
+    MissingQuestionMark(String),
+    #[error("number pattern variable {0:?} was malformed")]
+    BadNumber(String),
+}
+
+impl FromStr for Var {
+    type Err = VarParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use VarParseError::*;
+
+        match s.as_bytes() {
+            [b'?', b'#', ..] => s[2..]
+                .parse()
+                .map(|num| Var(VarInner::Num(num)))
+                .map_err(|_| BadNumber(s.to_owned())),
+            [b'?', ..] if s.len() > 1 => Ok(Var(VarInner::Sym(Symbol::from(s)))),
+            _ => Err(MissingQuestionMark(s.to_owned())),
+        }
     }
 }
 
-impl fmt::Debug for Var {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+impl Display for Var {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            VarInner::Sym(sym) => write!(f, "{}", sym),
+            VarInner::Num(num) => write!(f, "?#{}", num),
+        }
     }
 }
 
-/// A substitition mapping [`Var`]s to eclass [`Id`]s.
+impl Debug for Var {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            VarInner::Sym(sym) => write!(f, "{:?}", sym),
+            VarInner::Num(num) => write!(f, "?#{}", num),
+        }
+    }
+}
+
+impl From<u32> for Var {
+    fn from(num: u32) -> Self {
+        Var(VarInner::Num(num))
+    }
+}
+
+/// A substitution mapping [`Var`]s to eclass [`Id`]s.
 ///
-/// [`Var`]: struct.Var.html
-/// [`Id`]: struct.Id.html
 #[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Subst {
     pub(crate) vec: smallvec::SmallVec<[(Var, Id); 3]>,
@@ -81,13 +135,13 @@ impl std::ops::Index<Var> for Subst {
     fn index(&self, var: Var) -> &Self::Output {
         match self.get(var) {
             Some(id) => id,
-            None => panic!("Var '{}={}' not found in {:?}", var.0, var, self),
+            None => panic!("Var '{}={}' not found in {:?}", var, var, self),
         }
     }
 }
 
-impl fmt::Debug for Subst {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for Subst {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let len = self.vec.len();
         write!(f, "{{")?;
         for i in 0..len {
@@ -112,5 +166,16 @@ mod tests {
         assert!(Var::from_str("a").is_err());
         assert!(Var::from_str("a?").is_err());
         assert!(Var::from_str("?").is_err());
+        assert!(Var::from_str("?#").is_err());
+        assert!(Var::from_str("?#foo").is_err());
+
+        // numeric vars
+        assert_eq!(Var::from_str("?#0").unwrap(), Var(VarInner::Num(0)));
+        assert_eq!(Var::from_str("?#010").unwrap(), Var(VarInner::Num(10)));
+        assert_eq!(
+            Var::from_str("?#10").unwrap(),
+            Var::from_str("?#0010").unwrap()
+        );
+        assert_eq!(Var::from_str("?#010").unwrap(), Var(VarInner::Num(10)));
     }
 }
